@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisionAid | Smart Spectacles Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load TensorFlow.js and COCO-SSD model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/dist/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            scroll-behavior: smooth;
+        }
+
+        .scanning-line {
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #22c55e, transparent);
+            width: 100%;
+            position: absolute;
+            top: 0;
+            animation: scan 3s linear infinite;
+        }
+
+        @keyframes scan {
+            0% { top: 0; }
+            100% { top: 100%; }
+        }
+
+        .glass {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .status-pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+        }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        /* Lane Overlay for testing visibility */
+        .lane-guide {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 33.33%;
+            border-left: 1px dashed rgba(255, 255, 255, 0.2);
+            border-right: 1px dashed rgba(255, 255, 255, 0.2);
+            pointer-events: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.3);
+            text-transform: uppercase;
+        }
+        .lane-left { left: 0; }
+        .lane-center { left: 33.33%; background: rgba(34, 197, 94, 0.05); }
+        .lane-right { left: 66.66%; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200">
+
+    <!-- Navigation -->
+    <nav class="fixed w-full z-50 glass py-4">
+        <div class="container mx-auto px-6 flex justify-between items-center">
+            <div class="flex items-center gap-2">
+                <i class="fas fa-eye text-green-500 text-2xl"></i>
+                <span class="text-xl font-bold tracking-tighter uppercase">VisionAid</span>
+            </div>
+            <div class="flex items-center gap-4">
+                <span id="connection-status" class="flex items-center gap-2 text-xs font-bold text-slate-500">
+                    <span class="w-2 h-2 bg-slate-500 rounded-full"></span>
+                    <span id="status-text">SYSTEM OFFLINE</span>
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Dashboard -->
+    <header id="dashboard" class="relative min-h-screen flex items-center pt-24 overflow-hidden">
+        <div class="container mx-auto px-6 grid lg:grid-cols-12 gap-12 items-start">
+            
+            <div class="lg:col-span-8">
+                <div class="relative rounded-3xl overflow-hidden border-2 border-slate-800 bg-black aspect-video shadow-2xl">
+                    <div class="video-container">
+                        <video id="video-feed" autoplay playsinline muted class="w-full h-full object-cover opacity-0 transition-opacity duration-500"></video>
+                        
+                        <!-- Lane Indicators -->
+                        <div id="visual-guides" class="absolute inset-0 hidden">
+                            <div class="lane-guide lane-left">Left</div>
+                            <div class="lane-guide lane-center">Front</div>
+                            <div class="lane-guide lane-right">Right</div>
+                        </div>
+
+                        <canvas id="detection-canvas"></canvas>
+                    </div>
+                    
+                    <div id="video-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-600 bg-slate-900">
+                        <i id="loading-icon" class="fas fa-camera text-4xl mb-4"></i>
+                        <p id="loading-text">Camera Offline</p>
+                    </div>
+                    
+                    <div id="hud" class="absolute inset-0 pointer-events-none hidden">
+                        <div class="scanning-line"></div>
+                        <div class="absolute bottom-6 left-6 glass px-4 py-2 rounded-xl">
+                            <p class="text-xs uppercase text-slate-400">Navigation Prompt</p>
+                            <p id="nav-instruction" class="text-2xl font-bold text-green-400 uppercase">Clear Path</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mt-6 flex justify-between items-center glass p-6 rounded-2xl">
+                    <div>
+                        <h2 id="nav-status-title" class="text-xl font-bold">Model Not Loaded</h2>
+                        <p id="nav-status-desc" class="text-slate-400 text-sm">Waiting for AI engine...</p>
+                    </div>
+                    <button id="toggle-nav" disabled class="bg-slate-700 text-slate-400 px-8 py-3 rounded-full font-bold transition-all flex items-center gap-3 cursor-not-allowed">
+                        <i class="fas fa-hourglass-start"></i>
+                        <span>Loading AI...</span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="lg:col-span-4 space-y-6">
+                <div class="glass p-8 rounded-3xl">
+                    <h3 class="font-bold mb-4 flex items-center gap-2 text-red-400">
+                        <i class="fas fa-exclamation-triangle"></i> Proximity Alerts
+                    </h3>
+                    <div id="detection-list" class="space-y-2 text-sm">
+                        Waiting for active scan...
+                    </div>
+                </div>
+
+                <div class="bg-slate-800 p-8 rounded-3xl text-white">
+                    <h3 class="font-bold mb-2">Safety Guide</h3>
+                    <ul class="text-xs text-slate-400 space-y-2">
+                        <li class="flex items-center gap-2"><i class="fas fa-circle text-[6px] text-green-500"></i> Center path clear: Move Forward</li>
+                        <li class="flex items-center gap-2"><i class="fas fa-circle text-[6px] text-yellow-500"></i> Side blocked: Shift Direction</li>
+                        <li class="flex items-center gap-2"><i class="fas fa-circle text-[6px] text-red-500"></i> Multiple blocked: Stop Immediately</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <script>
+        const video = document.getElementById('video-feed');
+        const canvas = document.getElementById('detection-canvas');
+        const ctx = canvas.getContext('2d');
+        const placeholder = document.getElementById('video-placeholder');
+        const hud = document.getElementById('hud');
+        const guides = document.getElementById('visual-guides');
+        const toggleBtn = document.getElementById('toggle-nav');
+        const navTitle = document.getElementById('nav-status-title');
+        const navDesc = document.getElementById('nav-status-desc');
+        const statusText = document.getElementById('status-text');
+        const detectionList = document.getElementById('detection-list');
+        const navInstruction = document.getElementById('nav-instruction');
+
+        let model = null;
+        let isNavigating = false;
+        let animationId = null;
+        let lastSpeakTime = 0;
+        let lastInstruction = "";
+
+        async function loadModel() {
+            try {
+                model = await cocoSsd.load();
+                toggleBtn.disabled = false;
+                toggleBtn.classList.replace('bg-slate-700', 'bg-green-600');
+                toggleBtn.classList.replace('text-slate-400', 'text-white');
+                toggleBtn.classList.remove('cursor-not-allowed');
+                toggleBtn.innerHTML = '<i class="fas fa-play"></i> <span>Start Navigation</span>';
+                navTitle.innerText = "AI Ready";
+                navDesc.innerText = "Zonal Navigation System Online.";
+                speak("Vision Aid Navigation ready.");
+            } catch (err) {
+                console.error("Model loading failed", err);
+                navTitle.innerText = "Loading Failed";
+            }
+        }
+
+        function speak(text) {
+            if ('speechSynthesis' in window) {
+                const now = Date.now();
+                // Avoid spamming the same instruction too fast
+                if (now - lastSpeakTime > 2500 || text !== lastInstruction) {
+                    window.speechSynthesis.cancel();
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.rate = 1.1; // Slightly faster for real-time safety
+                    window.speechSynthesis.speak(utterance);
+                    lastSpeakTime = now;
+                    lastInstruction = text;
+                }
+            }
+        }
+
+        async function detectFrame() {
+            if (!isNavigating) return;
+
+            const predictions = await model.detect(video);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            let zones = { left: [], center: [], right: [] };
+            const videoWidth = video.videoWidth;
+
+            predictions.forEach(prediction => {
+                const [x, y, width, height] = prediction.bbox;
+                const centerX = x + (width / 2);
+                
+                // Determine Zone
+                let zone = "center";
+                if (centerX < videoWidth / 3) zone = "left";
+                else if (centerX > (videoWidth / 3) * 2) zone = "right";
+
+                zones[zone].push(prediction.class);
+
+                // Drawing logic
+                ctx.strokeStyle = zone === 'center' ? '#ef4444' : '#f59e0b'; // Red for center, Yellow for sides
+                ctx.lineWidth = 4;
+                ctx.strokeRect(x, y, width, height);
+
+                ctx.fillStyle = ctx.strokeStyle;
+                ctx.font = 'bold 16px Inter';
+                ctx.fillText(`${prediction.class} (${zone})`, x + 5, y - 7);
+            });
+
+            // Logic for Navigation Advice
+            updateNavigation(zones);
+
+            animationId = requestAnimationFrame(detectFrame);
+        }
+
+        function updateNavigation(zones) {
+            let statusHTML = "";
+            let instruction = "Path Clear. Move Forward.";
+            let danger = false;
+
+            if (zones.center.length > 0) {
+                instruction = `Danger! ${zones.center[0]} directly in front. Stop.`;
+                danger = true;
+                statusHTML += `<div class="bg-red-500/20 text-red-400 p-2 rounded border border-red-500/50 font-bold">FRONT: ${zones.center.join(', ')}</div>`;
+            }
+            
+            if (zones.left.length > 0) {
+                statusHTML += `<div class="bg-yellow-500/20 text-yellow-400 p-2 rounded border border-yellow-500/50 font-bold">LEFT: ${zones.left.join(', ')}</div>`;
+                if (!danger) instruction = "Obstacle on left. Keep right.";
+            }
+
+            if (zones.right.length > 0) {
+                statusHTML += `<div class="bg-yellow-500/20 text-yellow-400 p-2 rounded border border-yellow-500/50 font-bold">RIGHT: ${zones.right.join(', ')}</div>`;
+                if (!danger && zones.left.length === 0) instruction = "Obstacle on right. Keep left.";
+            }
+
+            if (statusHTML === "") {
+                detectionList.innerHTML = '<div class="text-green-500 font-bold">ALL ZONES CLEAR</div>';
+                navInstruction.innerText = "Move Forward";
+                navInstruction.className = "text-2xl font-bold text-green-400 uppercase";
+                speak("Path clear. Move forward.");
+            } else {
+                detectionList.innerHTML = statusHTML;
+                navInstruction.innerText = instruction;
+                navInstruction.className = danger ? "text-2xl font-bold text-red-500 uppercase haptic-feedback" : "text-2xl font-bold text-yellow-500 uppercase";
+                speak(instruction);
+            }
+        }
+
+        toggleBtn.addEventListener('click', async () => {
+            if (!isNavigating) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: "environment" }, 
+                        audio: false 
+                    });
+                    video.srcObject = stream;
+                    video.onloadedmetadata = () => {
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        video.classList.remove('opacity-0');
+                        placeholder.classList.add('hidden');
+                        hud.classList.remove('hidden');
+                        guides.classList.remove('hidden');
+                        isNavigating = true;
+                        toggleBtn.innerHTML = '<i class="fas fa-stop"></i> <span>Stop Navigation</span>';
+                        toggleBtn.classList.replace('bg-green-600', 'bg-red-600');
+                        navTitle.innerText = "Navigation Active";
+                        statusText.innerText = "SYSTEM ACTIVE";
+                        detectFrame();
+                    };
+                } catch (err) {
+                    alert("Please allow camera access.");
+                }
+            } else {
+                isNavigating = false;
+                if (animationId) cancelAnimationFrame(animationId);
+                const tracks = video.srcObject.getTracks();
+                tracks.forEach(track => track.stop());
+                video.classList.add('opacity-0');
+                placeholder.classList.remove('hidden');
+                hud.classList.add('hidden');
+                guides.classList.add('hidden');
+                toggleBtn.innerHTML = '<i class="fas fa-play"></i> <span>Start Navigation</span>';
+                toggleBtn.classList.replace('bg-red-600', 'bg-green-600');
+                navTitle.innerText = "AI Ready";
+                statusText.innerText = "SYSTEM OFFLINE";
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                speak("Navigation stopped.");
+            }
+        });
+
+        window.onload = loadModel;
+    </script>
+</body>
+</html>
